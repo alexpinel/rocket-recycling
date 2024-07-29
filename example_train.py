@@ -10,9 +10,25 @@ import glob
 # Decide which device we want to run on
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-if __name__ == '__main__':
+def load_model(net, ckpt_dir):
+    if os.path.exists(ckpt_dir):
+        checkpoint = torch.load(ckpt_dir)
+        # Get the state dict from the checkpoint
+        state_dict = checkpoint['model_G_state_dict']
+        
+        # Filter out incompatible keys
+        compatible_state_dict = {k: v for k, v in state_dict.items() if k in net.state_dict() and v.shape == net.state_dict()[k].shape}
+        
+        # Load the compatible state dict
+        net.load_state_dict(compatible_state_dict, strict=False)
+        print(f"Loaded compatible weights from {ckpt_dir}")
+        return checkpoint['episode_id'], checkpoint['REWARDS']
+    else:
+        print(f"No checkpoint found at {ckpt_dir}")
+        return 0, []
 
-    task = 'hover'  # 'hover' or 'landing'
+if __name__ == '__main__':
+    task = 'landing'  # 'hover' or 'landing'
 
     max_m_episode = 800000
     max_steps = 800
@@ -22,31 +38,30 @@ if __name__ == '__main__':
     if not os.path.exists(ckpt_folder):
         os.mkdir(ckpt_folder)
 
+    net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
+    
     last_episode_id = 0
     REWARDS = []
-
-    net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
+    
     if len(glob.glob(os.path.join(ckpt_folder, '*.pt'))) > 0:
         # load the last ckpt
-        checkpoint = torch.load(glob.glob(os.path.join(ckpt_folder, '*.pt'))[-1])
-        net.load_state_dict(checkpoint['model_G_state_dict'])
-        last_episode_id = checkpoint['episode_id']
-        REWARDS = checkpoint['REWARDS']
+        ckpt_path = glob.glob(os.path.join(ckpt_folder, '*.pt'))[-1]
+        last_episode_id, REWARDS = load_model(net, ckpt_path)
 
     for episode_id in range(last_episode_id, max_m_episode):
-
         # training loop
         state = env.reset()
         rewards, log_probs, values, masks = [], [], [], []
         for step_id in range(max_steps):
             action, log_prob, value = net.get_action(state)
-            state, reward, done, _ = env.step(action)
+            next_state, reward, done, _ = env.step(action)
             rewards.append(reward)
             log_probs.append(log_prob)
             values.append(value)
             masks.append(1-done)
-            if episode_id % 100 == 1:
-                env.render()
+            state = next_state
+            #if episode_id % 100 == 1:
+            #    env.render()
 
             if done or step_id == max_steps-1:
                 _, _, Qval = net.get_action(state)
@@ -70,6 +85,3 @@ if __name__ == '__main__':
                         'REWARDS': REWARDS,
                         'model_G_state_dict': net.state_dict()},
                        os.path.join(ckpt_folder, 'ckpt_' + str(episode_id).zfill(8) + '.pt'))
-
-
-

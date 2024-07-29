@@ -51,11 +51,8 @@ class PositionalMapping(nn.Module):
         return torch.cat(h, dim=-1) / self.scale
 
 
-class MLP(nn.Module):
-    """
-    Multilayer perception with an embedded positional mapping
-    """
 
+class MLP(nn.Module):
     def __init__(self, input_dim, output_dim):
         super().__init__()
 
@@ -69,8 +66,6 @@ class MLP(nn.Module):
         self.relu = nn.LeakyReLU(0.2)
 
     def forward(self, x):
-        # shape x: 1 x m_token x m_state
-        x = x.view([1, -1])
         x = self.mapping(x)
         x = self.relu(self.linear1(x))
         x = self.relu(self.linear2(x))
@@ -78,12 +73,7 @@ class MLP(nn.Module):
         x = self.linear4(x)
         return x
 
-
 class ActorCritic(nn.Module):
-    """
-    RL policy and update rules
-    """
-
     def __init__(self, input_dim, output_dim):
         super().__init__()
 
@@ -95,19 +85,16 @@ class ActorCritic(nn.Module):
         self.optimizer = optim.RMSprop(self.parameters(), lr=5e-5)
 
     def forward(self, x):
-        # shape x: batch_size x m_token x m_state
         y = self.actor(x)
         probs = self.softmax(y)
         value = self.critic(x)
-
         return probs, value
 
     def get_action(self, state, deterministic=False, exploration=0.01):
-
         state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
         probs, value = self.forward(state)
-        probs = probs[0, :]
-        value = value[0]
+        probs = probs.squeeze(0)
+        value = value.squeeze(0)
 
         if deterministic:
             action_id = np.argmax(np.squeeze(probs.detach().cpu().numpy()))

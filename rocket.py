@@ -43,6 +43,12 @@ class Rocket(object):
         self.world_y_min = -30
         self.world_y_max = 570
 
+        self.fuel_duration = 5  # seconds
+        self.fuel_remaining = self.fuel_duration
+        self.engine_on = False
+        self.engine_started = False 
+        self.constant_thrust = 1.5 * self.g  # constant thrust when engine is on
+
         # target point
         if self.task == 'hover':
             self.target_x, self.target_y, self.target_r = 0, 200, 50
@@ -62,7 +68,7 @@ class Rocket(object):
         self.state = self.create_random_state()
         self.action_table = self.create_action_table()
 
-        self.state_dims = 8
+        self.state_dims = 9  # Update this to the correct number of state dimensions
         self.action_dims = len(self.action_table)
 
         if path_to_bg_img is None:
@@ -73,7 +79,6 @@ class Rocket(object):
 
 
     def reset(self, state_dict=None):
-
         if state_dict is None:
             self.state = self.create_random_state()
         else:
@@ -82,6 +87,10 @@ class Rocket(object):
         self.state_buffer = []
         self.step_id = 0
         self.already_landing = False
+        self.fuel_remaining = self.fuel_duration
+        self.engine_on = False
+        self.engine_started = False  # Reset this flag on each new episode
+
         cv2.destroyAllWindows()
         return self.flatten(self.state)
 
@@ -93,17 +102,15 @@ class Rocket(object):
         vphi1 = 30 / 180 * np.pi
         vphi2 = -30 / 180 * np.pi
 
-        action_table = [[f0, vphi0], [f0, vphi1], [f0, vphi2],
-                        [f1, vphi0], [f1, vphi1], [f1, vphi2],
-                        [f2, vphi0], [f2, vphi1], [f2, vphi2]
-                        ]
-        return action_table
+        return [[0, vphi0], [0, vphi1], [0, vphi2],
+                    [1, vphi0], [1, vphi1], [1, vphi2]]
+
+
 
     def get_random_action(self):
         return random.randint(0, len(self.action_table)-1)
 
     def create_random_state(self):
-
         # predefined locations
         x_range = self.world_x_max - self.world_x_min
         y_range = self.world_y_max - self.world_y_min
@@ -114,9 +121,9 @@ class Rocket(object):
             x = random.uniform(xc - x_range / 4.0, xc + x_range / 4.0)
             y = yc + 0.4*y_range
             if x <= 0:
-                theta = -85 / 180 * np.pi
+                theta = -35 / 180 * np.pi
             else:
-                theta = 85 / 180 * np.pi
+                theta = 35 / 180 * np.pi
             vy = -50
 
         if self.task == 'hover':
@@ -129,11 +136,11 @@ class Rocket(object):
             'x': x, 'y': y, 'vx': 0, 'vy': vy,
             'theta': theta, 'vtheta': 0,
             'phi': 0, 'f': 0,
-            't': 0, 'a_': 0
+            't': 0, 'fuel_remaining': self.fuel_duration
         }
 
         return state
-
+    
     def check_crash(self, state):
         if self.task == 'hover':
             x, y = state['x'], state['y']
@@ -178,7 +185,6 @@ class Rocket(object):
                            and abs(theta) < 10/180*np.pi and abs(vtheta) < 10/180*np.pi else False
 
     def calculate_reward(self, state):
-
         x_range = self.world_x_max - self.world_x_min
         y_range = self.world_y_max - self.world_y_min
 
@@ -205,26 +211,62 @@ class Rocket(object):
             reward = 0
 
         v = (state['vx'] ** 2 + state['vy'] ** 2) ** 0.5
-        if self.task == 'landing' and self.already_crash:
-            reward = (reward + 5*np.exp(-1*v/10.)) * (self.max_steps - self.step_id)
-        if self.task == 'landing' and self.already_landing:
-            reward = (1.0 + 5*np.exp(-1*v/10.))*(self.max_steps - self.step_id)
+        
+        if self.task == 'landing':
+            # Penalize early ignition
+            if self.engine_on:
+                ignition_penalty = 1* (state['y'] / self.world_y_max)  # Penalty decreases as y decreases
+                reward -= ignition_penalty
+
+                thrust_vector_bonus = 1 * abs(state['phi']) / (20/180*np.pi)  # Max bonus at max deflection
+                reward += thrust_vector_bonus
+
+            if self.step_id == 1 and self.engine_started:
+                reward -= 500  # Large penalty for immediate engine start
+
+            if self.already_crash:
+                reward = -100  # Large negative reward for crashing
+            elif self.already_landing:
+                # Bonus for remaining fuel
+                fuel_bonus = 0.5 * (self.fuel_remaining / self.fuel_duration)
+                reward = (1.0 + 5*np.exp(-1*v/10.) + fuel_bonus) * (self.max_steps - self.step_id)
 
         return reward
 
     def step(self, action):
-
         x, y, vx, vy = self.state['x'], self.state['y'], self.state['vx'], self.state['vy']
         theta, vtheta = self.state['theta'], self.state['vtheta']
         phi = self.state['phi']
 
-        f, vphi = self.action_table[action]
+        engine_action, vphi = self.action_table[action]
+
+        # Update engine state based on action
+        if engine_action == 1 and not self.engine_started and self.fuel_remaining > 0:
+            self.engine_on = True
+            self.engine_started = True
+
+        # Apply thrust if engine is on and there's fuel
+        if self.engine_on and self.fuel_remaining > 0:
+            f = self.constant_thrust
+            self.fuel_remaining -= self.dt
+        else:
+            f = 0
+
+        if self.fuel_remaining <= 0:
+            self.fuel_remaining = 0
+            self.engine_on = False
+
+
+        # Update nozzle angle
+        phi = phi + self.dt * vphi
+        phi = max(phi, -20/180*np.pi)
+        phi = min(phi, 20/180*np.pi)
 
         ft, fr = -f*np.sin(phi), f*np.cos(phi)
         fx = ft*np.cos(theta) - fr*np.sin(theta)
         fy = ft*np.sin(theta) + fr*np.cos(theta)
 
-        rho = 1 / (125/(self.g/2.0))**0.5  # suppose after 125 m free fall, then air resistance = mg
+        rho = 1 / (125/(self.g/2.0))**0.5
         ax, ay = fx-rho*vx, fy-self.g-rho*vy
         atheta = ft*self.H/2 / self.I
 
@@ -240,16 +282,12 @@ class Rocket(object):
         vx_new, vy_new = vx + ax * self.dt, vy + ay * self.dt
         theta_new = theta + vtheta*self.dt + 0.5 * atheta * (self.dt**2)
         vtheta_new = vtheta + atheta * self.dt
-        phi = phi + self.dt*vphi
-
-        phi = max(phi, -20/180*3.1415926)
-        phi = min(phi, 20/180*3.1415926)
 
         self.state = {
             'x': x_new, 'y': y_new, 'vx': vx_new, 'vy': vy_new,
             'theta': theta_new, 'vtheta': vtheta_new,
             'phi': phi, 'f': f,
-            't': self.step_id, 'action_': action
+            't': self.step_id, 'fuel_remaining': self.fuel_remaining
         }
         self.state_buffer.append(self.state)
 
@@ -267,7 +305,7 @@ class Rocket(object):
     def flatten(self, state):
         x = [state['x'], state['y'], state['vx'], state['vy'],
              state['theta'], state['vtheta'], state['t'],
-             state['phi']]
+             state['phi'], state['fuel_remaining']]
         return np.array(x, dtype=np.float32)/100.
 
     def render(self, window_name='env', wait_time=1,
@@ -331,6 +369,7 @@ class Rocket(object):
             polys['rocket'].append({'pts': pts, 'face_color': None, 'edge_color': (0, 0, 0)})
             pts = [[W/2, -H/2], [W/2+H/10, -H/2-H/20], [W/2, -H/2+H/20]]
             polys['rocket'].append({'pts': pts, 'face_color': None, 'edge_color': (0, 0, 0)})
+        
 
         elif self.rocket_type == 'starship':
 
@@ -406,6 +445,18 @@ class Rocket(object):
         # engine work
         f, phi = self.state['f'], self.state['phi']
         c, s = np.cos(phi), np.sin(phi)
+
+
+        if self.engine_on:
+            H, dl = self.H, self.H / 30
+            pts1 = utils.create_rectangle_poly(center=(2 * dl * s, -H / 2 - 2 * dl * c), w=dl, h=dl)
+            pts2 = utils.create_rectangle_poly(center=(5 * dl * s, -H / 2 - 5 * dl * c), w=1.5 * dl, h=1.5 * dl)
+            pts3 = utils.create_rectangle_poly(center=(8 * dl * s, -H / 2 - 8 * dl * c), w=2 * dl, h=2 * dl)
+            pts4 = utils.create_rectangle_poly(center=(12 * dl * s, -H / 2 - 12 * dl * c), w=3 * dl, h=3 * dl)
+            polys['engine_work'].append({'pts': pts1, 'face_color': (255, 255, 255), 'edge_color': None})
+            polys['engine_work'].append({'pts': pts2, 'face_color': (255, 255, 255), 'edge_color': None})
+            polys['engine_work'].append({'pts': pts3, 'face_color': (255, 255, 255), 'edge_color': None})
+            polys['engine_work'].append({'pts': pts4, 'face_color': (255, 255, 255), 'edge_color': None})
 
         if f > 0 and f < 0.5 * self.g:
             pts1 = utils.create_rectangle_poly(center=(2 * dl * s, -H / 2 - 2 * dl * c), w=dl, h=dl)
@@ -487,6 +538,22 @@ class Rocket(object):
         def put_text(vis, text, pt):
             cv2.putText(vis, text=text, org=pt, fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                         fontScale=0.5, color=color, thickness=1, lineType=cv2.LINE_AA)
+
+
+        pt = (10, 120)
+        text = "Fuel remaining: %.2f s" % self.state['fuel_remaining']
+        cv2.putText(canvas, text=text, org=pt, fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.5, color=color, thickness=1, lineType=cv2.LINE_AA)
+
+        pt = (10, 140)
+        text = "Engine: %s" % ("ON" if self.engine_on else "OFF")
+        cv2.putText(canvas, text=text, org=pt, fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.5, color=color, thickness=1, lineType=cv2.LINE_AA)
+
+        pt = (10, 160)
+        text = "Nozzle angle: %.2f deg" % (self.state['phi'] * 180 / np.pi)
+        cv2.putText(canvas, text=text, org=pt, fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.5, color=color, thickness=1, lineType=cv2.LINE_AA)
 
         pt = (10, 20)
         text = "simulation time: %.2fs" % (self.step_id * self.dt)

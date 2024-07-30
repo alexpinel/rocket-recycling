@@ -47,7 +47,7 @@ class Rocket(object):
         self.fuel_remaining = self.fuel_duration
         self.engine_on = False
         self.engine_started = False 
-        self.constant_thrust = 1.5 * self.g  # constant thrust when engine is on
+        self.constant_thrust = 1.8 * self.g  # constant thrust when engine is on
 
         # target point
         if self.task == 'hover':
@@ -120,10 +120,7 @@ class Rocket(object):
         if self.task == 'landing':
             x = random.uniform(xc - x_range / 4.0, xc + x_range / 4.0)
             y = yc + 0.4*y_range
-            if x <= 0:
-                theta = -35 / 180 * np.pi
-            else:
-                theta = 35 / 180 * np.pi
+            theta = random.uniform(-35, 35) / 180 * np.pi
             vy = -50
 
         if self.task == 'hover':
@@ -199,7 +196,7 @@ class Rocket(object):
             pose_reward = 0.1
         else:
             pose_reward = abs(state['theta']) / (0.5*np.pi)
-            pose_reward = 0.1 * (1.0 - pose_reward)
+            pose_reward = 1 * (1.0 - pose_reward)
 
         reward = dist_reward + pose_reward
 
@@ -215,14 +212,27 @@ class Rocket(object):
         if self.task == 'landing':
             # Penalize early ignition
             if self.engine_on:
-                ignition_penalty = 1* (state['y'] / self.world_y_max)  # Penalty decreases as y decreases
+                ignition_penalty = 2* (state['y'] / self.world_y_max)  # Penalty decreases as y decreases
                 reward -= ignition_penalty
 
-                thrust_vector_bonus = 1 * abs(state['phi']) / (20/180*np.pi)  # Max bonus at max deflection
+                thrust_vector_bonus = 5 * abs(state['phi']) / (20/180*np.pi)  # Max bonus at max deflection
                 reward += thrust_vector_bonus
 
             if self.step_id == 1 and self.engine_started:
                 reward -= 500  # Large penalty for immediate engine start
+            
+            if state['y'] <= self.H:  # When close to the ground
+                safe_velocity = 5.0  # m/s, adjust as needed
+                velocity_factor = 5.0  # Adjust to increase/decrease the impact of velocity on reward
+                
+                if v <= safe_velocity:
+                    # Reward for low landing velocity
+                    velocity_reward = velocity_factor * (1 - v / safe_velocity)
+                    reward += velocity_reward
+                else:
+                    # Penalty for high landing velocity
+                    velocity_penalty = velocity_factor * (v / safe_velocity - 1)
+                    reward -= velocity_penalty
 
             if self.already_crash:
                 reward = -100  # Large negative reward for crashing
@@ -230,6 +240,11 @@ class Rocket(object):
                 # Bonus for remaining fuel
                 fuel_bonus = 0.5 * (self.fuel_remaining / self.fuel_duration)
                 reward = (1.0 + 5*np.exp(-1*v/10.) + fuel_bonus) * (self.max_steps - self.step_id)
+
+                if v <= safe_velocity:
+                    reward += 5.0 * (1 - v / safe_velocity)  # Up to 5 additional points for perfect landing
+                else:
+                    reward -= 5.0 * (v / safe_velocity - 1)  # Penalty for landing too fast
 
         return reward
 

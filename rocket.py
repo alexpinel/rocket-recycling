@@ -27,8 +27,10 @@ class Rocket(object):
 
     """
 
-    def __init__(self, max_steps, task='hover', rocket_type='falcon',
-                 viewport_h=768, path_to_bg_img=None):
+    def __init__(self, max_steps, task='hover', rocket_type='falcon', viewport_h=768, path_to_bg_img=None, difficulty=0):
+        self.task = task
+        self.rocket_type = rocket_type
+        self.difficulty = difficulty
 
         self.task = task
         self.rocket_type = rocket_type
@@ -47,7 +49,7 @@ class Rocket(object):
         self.fuel_remaining = self.fuel_duration
         self.engine_on = False
         self.engine_started = False 
-        self.constant_thrust = 1.8 * self.g  # constant thrust when engine is on
+        self.constant_thrust = 1.5 * self.g  # constant thrust when engine is on
 
         # target point
         if self.task == 'hover':
@@ -78,7 +80,8 @@ class Rocket(object):
         self.state_buffer = []
 
 
-    def reset(self, state_dict=None):
+    def reset(self, state_dict=None, difficulty=0):
+        self.difficulty = difficulty  # Update difficulty level
         if state_dict is None:
             self.state = self.create_random_state()
         else:
@@ -111,7 +114,6 @@ class Rocket(object):
         return random.randint(0, len(self.action_table)-1)
 
     def create_random_state(self):
-        # predefined locations
         x_range = self.world_x_max - self.world_x_min
         y_range = self.world_y_max - self.world_y_min
         xc = (self.world_x_max + self.world_x_min) / 2.0
@@ -119,9 +121,23 @@ class Rocket(object):
 
         if self.task == 'landing':
             x = random.uniform(xc - x_range / 4.0, xc + x_range / 4.0)
-            y = yc + 0.4*y_range
+            y = yc + 0.4 * y_range
             theta = random.uniform(-35, 35) / 180 * np.pi
-            vy = -50
+            #vy = -50
+
+            # Adjust based on difficulty
+            if self.difficulty == 0:
+                #y = yc + 0.1 * y_range
+                y = 300
+                x = 0
+                vy = -5
+            elif self.difficulty == 1:
+                y = yc + 0.2 * y_range
+                vy = -20
+            elif self.difficulty == 2:
+                y = yc + 0.3 * y_range
+                vy = -30
+            # Add more difficulty levels as needed
 
         if self.task == 'hover':
             x = xc
@@ -137,6 +153,7 @@ class Rocket(object):
         }
 
         return state
+
     
     def check_crash(self, state):
         if self.task == 'hover':
@@ -247,6 +264,7 @@ class Rocket(object):
                     reward -= 5.0 * (v / safe_velocity - 1)  # Penalty for landing too fast
 
         return reward
+
 
     def step(self, action):
         x, y, vx, vy = self.state['x'], self.state['y'], self.state['vx'], self.state['vy']

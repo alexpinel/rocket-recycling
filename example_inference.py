@@ -30,7 +30,7 @@ if __name__ == '__main__':
     env = Rocket(task=task, max_steps=max_steps)
     net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
     
-    load_model(net, ckpt_dir)
+    load_model(net, '/Users/alexpinel/Desktop/instinct2d/landing_ckpt/ckpt_00011401.pt')
 
     state = env.reset()
     for step_id in range(max_steps):

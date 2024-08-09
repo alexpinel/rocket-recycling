@@ -127,9 +127,7 @@ class Rocket(object):
 
             # Adjust based on difficulty
             if self.difficulty == 0:
-                #y = yc + 0.1 * y_range
-                y = 300
-                x = 0
+                y = yc + 0.1 * y_range
                 vy = -5
             elif self.difficulty == 1:
                 y = yc + 0.2 * y_range
@@ -198,84 +196,43 @@ class Rocket(object):
             return True if y <= 0 + self.H / 2.0 and v < 15.0 and abs(x) < self.target_r \
                            and abs(theta) < 10/180*np.pi and abs(vtheta) < 10/180*np.pi else False
 
+
     def calculate_reward(self, state):
+
         x_range = self.world_x_max - self.world_x_min
         y_range = self.world_y_max - self.world_y_min
 
-        # Distance between agent and target point
+        # dist between agent and target point
         dist_x = abs(state['x'] - self.target_x)
         dist_y = abs(state['y'] - self.target_y)
-        dist_norm = (dist_x / x_range + dist_y / y_range) / 2
+        dist_norm = dist_x / x_range + dist_y / y_range
 
-        # Reward for distance
-        dist_reward = 2 * (1.0 - dist_norm)
+        dist_reward = 0.1*(1.0 - dist_norm)
 
-        # Reward for pose (angle)
         if abs(state['theta']) <= np.pi / 6.0:
-            pose_reward = 10 * (1 - abs(state['theta']) / (np.pi / 6.0))
+            pose_reward = 0.5
         else:
-            pose_reward = max(0, 1 - (abs(state['theta']) - np.pi / 6.0) / (np.pi / 3.0))
+            pose_reward = abs(state['theta']) / (0.5*np.pi)
+            pose_reward = 0.1 * (1.0 - pose_reward)
 
-        # Normalize pose reward to be in a similar range as dist_reward
-        pose_reward = pose_reward * 0.5
+        reward = dist_reward + pose_reward
 
-        # Reward for velocity
+        if self.task == 'hover' and (dist_x**2 + dist_y**2)**0.5 <= 2*self.target_r:  # hit target
+            reward = 0.25
+        if self.task == 'hover' and (dist_x**2 + dist_y**2)**0.5 <= 1*self.target_r:  # hit target
+            reward = 0.5
+        if self.task == 'hover' and abs(state['theta']) > 90 / 180 * np.pi:
+            reward = 0
+
         v = (state['vx'] ** 2 + state['vy'] ** 2) ** 0.5
-        max_velocity = 20.0  # Adjust as needed to match expected velocity range
-        velocity_penalty = min(1.0, v / max_velocity)
-        velocity_reward = 1.0 - velocity_penalty
-
-        # Combine the rewards
-        reward = dist_reward + pose_reward + velocity_reward
-
-        # Task-specific adjustments
-        if self.task == 'hover':
-            distance_to_target = (dist_x**2 + dist_y**2)**0.5
-            if distance_to_target <= 2 * self.target_r:  # Close to target
-                reward += 0.25
-            if distance_to_target <= 1 * self.target_r:  # Very close to target
-                reward += 0.5
-            if abs(state['theta']) > np.pi / 2:  # Large penalty for large inclination
-                reward = 0
-
-        elif self.task == 'landing':
-            # Penalize early ignition
-            if self.engine_on:
-                ignition_penalty = 2 * (state['y'] / self.world_y_max)
-                reward -= ignition_penalty
-
-            if self.step_id == 1 and self.engine_started:
-                reward -= 1000  # Large penalty for immediate engine start
-
-            if state['y'] <= self.H:  # Close to the ground
-                safe_velocity = 5.0  # m/s, adjust as needed
-                velocity_factor = 10.0  # Adjust to increase/decrease the impact of velocity on reward
-
-                if v <= safe_velocity:
-                    # Reward for low landing velocity
-                    velocity_reward = velocity_factor * (1 - v / safe_velocity)
-                    reward += velocity_reward
-                else:
-                    # Penalty for high landing velocity
-                    velocity_penalty = velocity_factor * (v / safe_velocity - 1)
-                    reward -= velocity_penalty
-
-                # Stabilization reward close to the ground
-                if state['y'] <= self.H:
-                    stabilization_penalty = abs(state['theta']) / (np.pi / 2) + v / max_velocity
-                    reward -= stabilization_penalty * 5.0  # Penalty increases with instability
-
-            if self.already_crash:
-                reward = -100  # Large negative reward for crashing
-            elif self.already_landing:
-                # Bonus for remaining fuel
-                if v <= safe_velocity:
-                    reward += 500.0 * (1 - v / safe_velocity)  # Up to 500 additional points for perfect landing
-                else:
-                    reward -= 15.0 * (v / safe_velocity - 1)  # Penalty for landing too fast
-
+        if self.task == 'landing' and self.already_crash:
+            reward = (reward + 5*np.exp(-1*v/10.)) * (self.max_steps - self.step_id)
+        if self.task == 'landing' and self.already_landing:
+            reward = (1.0 + 5*np.exp(-1*v/10.))*(self.max_steps - self.step_id)
+        if self.step_id == 1 and self.engine_started:
+            reward -= 1000  # Large penalty for immediate engine start
         return reward
-
+    
 
     def step(self, action):
         x, y, vx, vy = self.state['x'], self.state['y'], self.state['vx'], self.state['vy']

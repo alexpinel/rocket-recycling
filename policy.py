@@ -3,30 +3,13 @@ import numpy as np
 import torch
 import utils
 import torch.optim as optim
+from torch.distributions import Categorical
 
 import torch.nn as nn
 
-# Decide which device we want to run on
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-
-def calculate_returns(next_value, rewards, masks, gamma=0.99):
-    R = next_value
-    returns = []
-    for step in reversed(range(len(rewards))):
-        R = rewards[step] + gamma * R * masks[step]
-        returns.insert(0, R)
-    return returns
-
-
 class PositionalMapping(nn.Module):
-    """
-    Positional mapping Layer.
-    This layer map continuous input coordinates into a higher dimensional space
-    and enable the prediction to more easily approximate a higher frequency function.
-    See NERF paper for more details (https://arxiv.org/pdf/2003.08934.pdf)
-    """
-
     def __init__(self, input_dim, L=5, scale=1.0):
         super(PositionalMapping, self).__init__()
         self.L = L
@@ -34,12 +17,9 @@ class PositionalMapping(nn.Module):
         self.scale = scale
 
     def forward(self, x):
-
         x = x * self.scale
-
         if self.L == 0:
             return x
-
         h = [x]
         PI = 3.1415927410125732
         for i in range(self.L):
@@ -47,17 +27,12 @@ class PositionalMapping(nn.Module):
             x_cos = torch.cos(2**i * PI * x)
             h.append(x_sin)
             h.append(x_cos)
-
         return torch.cat(h, dim=-1) / self.scale
-
-
 
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim):
         super().__init__()
-
         self.mapping = PositionalMapping(input_dim=input_dim, L=7)
-
         h_dim = 128
         self.linear1 = nn.Linear(in_features=self.mapping.output_dim, out_features=h_dim, bias=True)
         self.linear2 = nn.Linear(in_features=h_dim, out_features=h_dim, bias=True)
@@ -73,57 +48,71 @@ class MLP(nn.Module):
         x = self.linear4(x)
         return x
 
+def calculate_returns(rewards, masks, gamma=0.99):
+    returns = []
+    R = 0
+    for r, mask in zip(reversed(rewards), reversed(masks)):
+        R = r + gamma * R * mask
+        returns.insert(0, R)
+    return returns
+
+
 class ActorCritic(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super().__init__()
+    def __init__(self, input_dim, output_dim, hidden_dim=64):
+        super(ActorCritic, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
 
-        self.output_dim = output_dim
-        self.actor = MLP(input_dim=input_dim, output_dim=output_dim)
-        self.critic = MLP(input_dim=input_dim, output_dim=1)
-        self.softmax = nn.Softmax(dim=-1)
+    def forward(self, state):
+        return self.actor(state), self.critic(state)
 
-        self.optimizer = optim.RMSprop(self.parameters(), lr=5e-5)
+    def get_action(self, state):
+        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        probs, _ = self.forward(state)
+        dist = Categorical(probs)
+        action = dist.sample()
+        return action.item(), dist.log_prob(action)
 
-    def forward(self, x):
-        y = self.actor(x)
-        probs = self.softmax(y)
-        value = self.critic(x)
-        return probs, value
-
-    def get_action(self, state, deterministic=False, exploration=0.01):
-        state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
-        probs, value = self.forward(state)
-        probs = probs.squeeze(0)
-        value = value.squeeze(0)
-
-        if deterministic:
-            action_id = np.argmax(np.squeeze(probs.detach().cpu().numpy()))
-        else:
-            if random.random() < exploration:  # exploration
-                action_id = random.randint(0, self.output_dim - 1)
-            else:
-                action_id = np.random.choice(self.output_dim, p=np.squeeze(probs.detach().cpu().numpy()))
-
-        log_prob = torch.log(probs[action_id] + 1e-9)
-
-        return action_id, log_prob, value
+    def update(self, states, actions, rewards, log_probs, gamma=0.99):
+        states = torch.FloatTensor(np.array(states)).to(device)
+        actions = torch.LongTensor(actions).to(device)
+        returns = self.compute_returns(rewards, gamma)
+        
+        _, state_values = self.forward(states)
+        state_values = state_values.squeeze()
+        
+        advantages = returns - state_values.detach()
+        
+        probs, _ = self.forward(states)
+        dist = Categorical(probs)
+        new_log_probs = dist.log_prob(actions)
+        
+        actor_loss = -(new_log_probs * advantages.detach()).mean()
+        critic_loss = advantages.pow(2).mean()
+        
+        loss = actor_loss + 0.5 * critic_loss
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        return loss.item()
 
     @staticmethod
-    def update_ac(network, rewards, log_probs, values, masks, Qval, gamma=0.99):
-
-        # compute Q values
-        Qvals = calculate_returns(Qval.detach(), rewards, masks, gamma=gamma)
-        Qvals = torch.tensor(Qvals, dtype=torch.float32).to(device).detach()
-
-        log_probs = torch.stack(log_probs)
-        values = torch.stack(values)
-
-        advantage = Qvals - values
-        actor_loss = (-log_probs * advantage.detach()).mean()
-        critic_loss = 0.5 * advantage.pow(2).mean()
-        ac_loss = actor_loss + critic_loss
-
-        network.optimizer.zero_grad()
-        ac_loss.backward()
-        network.optimizer.step()
-
+    def compute_returns(rewards, gamma=0.99):
+        returns = []
+        R = 0
+        for r in reversed(rewards):
+            R = r + gamma * R
+            returns.insert(0, R)
+        return torch.FloatTensor(returns).to(device)

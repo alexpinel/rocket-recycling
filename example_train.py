@@ -3,20 +3,16 @@ import torch
 from rocket import Rocket
 from policy import ActorCritic
 import matplotlib.pyplot as plt
-import utils
 import os
 import glob
 
-# Decide which device we want to run on
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def load_model(net, ckpt_dir):
     if os.path.exists(ckpt_dir):
         checkpoint = torch.load(ckpt_dir)
-        state_dict = checkpoint['model_G_state_dict']
-        compatible_state_dict = {k: v for k, v in state_dict.items() if k in net.state_dict() and v.shape == net.state_dict()[k].shape}
-        net.load_state_dict(compatible_state_dict, strict=False)
-        print(f"Loaded compatible weights from {ckpt_dir}")
+        net.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded weights from {ckpt_dir}")
         return checkpoint['episode_id'], checkpoint['REWARDS']
     else:
         print(f"No checkpoint found at {ckpt_dir}")
@@ -33,55 +29,60 @@ class TrainingManager:
         REWARDS = []
         for episode in range(episodes):
             state = self.rocket_env.reset(difficulty=self.difficulty)
-            rewards, log_probs, values, masks = [], [], [], []
-            for step_id in range(self.rocket_env.max_steps):
-                action, log_prob, value = self.agent.get_action(state)
+            episode_reward = 0
+            done = False
+            
+            states, actions, rewards, log_probs = [], [], [], []
+            
+            while not done:
+                action, log_prob = self.agent.get_action(state)
                 next_state, reward, done, _ = self.rocket_env.step(action)
+                
+                states.append(state)
+                actions.append(action)
                 rewards.append(reward)
                 log_probs.append(log_prob)
-                values.append(value)
-                masks.append(1-done)
+
                 state = next_state
+                episode_reward += reward
 
-                if episode % 100 == 1:
-                    env.render()
+            # Update the policy at the end of each episode
+            loss = self.agent.update(states, actions, rewards, log_probs)
 
-                if done or step_id == self.rocket_env.max_steps-1:
-                    _, _, Qval = self.agent.get_action(state)
-                    self.agent.update_ac(self.agent, rewards, log_probs, values, masks, Qval, gamma=0.999)
-                    break
-
-            REWARDS.append(np.sum(rewards))
-            print('episode id: %d, episode reward: %.3f' % (episode, np.sum(rewards)))
+            REWARDS.append(episode_reward)
+            print(f'episode id: {episode}, episode reward: {episode_reward:.3f}, loss: {loss:.3f}')
 
             if self.rocket_env.already_landing:
                 self.successful_landings += 1
 
-            if self.successful_landings >= 10:  # Example threshold
+            if self.successful_landings >= 10:
                 self.difficulty += 1
                 self.successful_landings = 0
                 print(f"Difficulty increased to {self.difficulty}")
 
-            if episode % 100 == 1:
-                plt.figure()
-                plt.plot(REWARDS), plt.plot(utils.moving_avg(REWARDS, N=50))
-                plt.legend(['episode reward', 'moving avg'], loc=2)
-                plt.xlabel('m episode')
+            if episode % 100 == 0:
+                plt.figure(figsize=(10, 5))
+                plt.plot(REWARDS)
+                plt.plot(np.convolve(REWARDS, np.ones(50)/50, mode='valid'))
+                plt.legend(['episode reward', 'moving avg'], loc='lower right')
+                plt.xlabel('episode')
                 plt.ylabel('reward')
-                plt.savefig(os.path.join(ckpt_folder, 'rewards_' + str(episode).zfill(8) + '.jpg'))
+                plt.title(f'Training Progress (Difficulty: {self.difficulty})')
+                plt.savefig(os.path.join(ckpt_folder, f'rewards_{episode:08d}.jpg'))
                 plt.close()
 
-                torch.save({'episode_id': episode,
-                            'REWARDS': REWARDS,
-                            'model_G_state_dict': self.agent.state_dict()},
-                           os.path.join(ckpt_folder, 'ckpt_' + str(episode).zfill(8) + '.pt'))
+                torch.save({
+                    'episode_id': episode,
+                    'REWARDS': REWARDS,
+                    'model_state_dict': self.agent.state_dict(),
+                    'difficulty': self.difficulty
+                }, os.path.join(ckpt_folder, f'ckpt_{episode:08d}.pt'))
 
         return REWARDS
 
 if __name__ == '__main__':
-    task = 'landing'  # 'hover' or 'landing'
-
-    max_m_episode = 800000
+    task = 'landing'
+    max_m_episode = 15000
     max_steps = 800
 
     env = Rocket(task=task, max_steps=max_steps)
@@ -98,5 +99,5 @@ if __name__ == '__main__':
         ckpt_path = glob.glob(os.path.join(ckpt_folder, '*.pt'))[-1]
         last_episode_id, REWARDS = load_model(net, ckpt_path)
 
-    training_manager = TrainingManager(env, net)
+    training_manager = TrainingManager(env, net, initial_difficulty=0)
     REWARDS = training_manager.train(episodes=max_m_episode)
